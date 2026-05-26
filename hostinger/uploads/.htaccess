@@ -1,0 +1,23 @@
+# ============================================================
+# WWAS - Uploads Directory Security
+# Prevent execution of any uploaded files
+# ============================================================
+
+# Deny direct access to all files
+Options -Indexes -ExecCGI
+
+# Disable PHP execution
+php_flag engine off
+
+# Block all script execution
+AddHandler cgi-script .php .pl .py .jsp .asp .sh .cgi .shtml
+
+# Allow only CSV and TXT downloads
+<FilesMatch "\.(php|php3|php4|php5|php7|phtml|pl|py|cgi|sh|rb|asp|aspx|jsp|exe|bat|cmd)$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>
+
+# Block direct web access entirely
+Order Allow,Deny
+Deny from all

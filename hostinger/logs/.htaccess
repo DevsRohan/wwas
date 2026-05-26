@@ -1,0 +1,16 @@
+# ============================================================
+# WWAS - Logs Directory Security
+# Block all direct HTTP access to log files
+# ============================================================
+
+Options -Indexes
+
+# Deny all web access
+Order Allow,Deny
+Deny from all
+
+# Deny access to log files specifically
+<FilesMatch "\.(log|txt|sql)$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>
