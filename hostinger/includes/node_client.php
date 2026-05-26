@@ -32,13 +32,17 @@ class NodeClient
         int $delayMs = 0
     ): array {
         $payload = [
-            'phone_number' => $phoneNumber,
+            'phone'        => $phoneNumber,           // Node expects 'phone' not 'phone_number'
             'message'      => $message,
-            'lead_id'      => $leadId,
-            'job_id'       => $jobId ?? ('php_' . $phoneNumber . '_' . time()),
-            'use_queue'    => $useQueue,
-            'delay_ms'     => $delayMs
+            'leadId'       => $leadId,                // Node expects 'leadId' not 'lead_id'
+            'immediate'    => !$useQueue,             // Node expects 'immediate' not 'use_queue'
         ];
+
+        // Add delay overrides only if provided (in seconds — Node converts internally)
+        if ($delayMs > 0) {
+            $payload['delayMin'] = (int) ($delayMs / 1000);
+            $payload['delayMax'] = (int) ($delayMs / 1000);
+        }
 
         return self::post('/send-message', $payload);
     }
@@ -51,7 +55,8 @@ class NodeClient
      */
     public static function checkNumber(string $phoneNumber): array
     {
-        return self::post('/check-number', ['phone_number' => $phoneNumber]);
+        // Node expects 'phone' not 'phone_number'
+        return self::post('/check-number', ['phone' => $phoneNumber]);
     }
 
     /**
@@ -66,7 +71,8 @@ class NodeClient
         if (empty($phoneNumbers)) {
             return ['success' => false, 'error' => 'No phone numbers provided'];
         }
-        return self::post('/check-number', ['phone_numbers' => array_values($phoneNumbers)]);
+        // Node expects 'phones' not 'phone_numbers'
+        return self::post('/check-number', ['phones' => array_values($phoneNumbers)]);
     }
 
     /**
@@ -76,7 +82,8 @@ class NodeClient
      */
     public static function getHealth(): array
     {
-        return self::get('/health');
+        // withAuth = true — Node /health requires X-API-Key
+        return self::get('/health', true);
     }
 
     /**
@@ -86,7 +93,7 @@ class NodeClient
      */
     public static function getQR(): array
     {
-        return self::get('/health/qr');
+        return self::get('/whatsapp/qr', true);
     }
 
     /**
@@ -96,7 +103,7 @@ class NodeClient
      */
     public static function getWaStatus(): array
     {
-        return self::get('/wa/status', true);
+        return self::get('/whatsapp/status', true);
     }
 
     /**
@@ -120,13 +127,14 @@ class NodeClient
     }
 
     /**
-     * Clear the outbound queue.
+     * Clear/stop the outbound queue.
      *
      * @return array
      */
     public static function clearQueue(): array
     {
-        return self::post('/queue/clear', []);
+        // Node endpoint is /queue/stop (clears and stops the queue)
+        return self::post('/queue/stop', []);
     }
 
     /**
