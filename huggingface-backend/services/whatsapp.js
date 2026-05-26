@@ -77,9 +77,9 @@ function _startClient() {
       headless: true,
       executablePath,
       args: _getPuppeteerArgs(),
-      timeout: 120000,
-      // Needed on HF Spaces — /tmp is writable
-      userDataDir: '/tmp/wwas-chrome-data'
+      timeout: 120000
+      // NOTE: Do NOT set userDataDir — LocalAuth manages its own data dir
+      // and throws "LocalAuth is not compatible with a user-supplied userDataDir"
     },
     webVersionCache: { type: 'none' }
   });
