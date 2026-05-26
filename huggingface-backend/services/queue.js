@@ -113,6 +113,9 @@ async function _startProcessor() {
     if (job.delayMs > 0) {
       logger.debug(`Waiting ${job.delayMs}ms before sending job`, { jobId: job.id });
       await _sleep(job.delayMs);
+      // IMPORTANT: Reset delayMs to 0 after sleeping so re-queued retries
+      // don't sleep the same duration again on the next loop iteration.
+      job.delayMs = 0;
     }
 
     // After sleep, check if queue was paused or job was removed

@@ -6,7 +6,7 @@
 const LeadsModule = (() => {
   let _leads = [];
   let _pagination = {};
-  let _filters = { search: '', whatsapp_status: '', outreach_status: '', pitch_type: '', page: 1 };
+  let _filters = { search: '', whatsapp_status: '', outreach_status: '', pitch_type: '', city: '', state: '', page: 1 };
   let _selectedLeadId = null;
   let _searchDebounce = null;
 

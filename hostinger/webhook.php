@@ -51,15 +51,23 @@ $deliveryId = sanitizeString($payload['delivery_id'] ?? '', 100);
 AppLogger::webhook('info', "Received webhook event: {$event}", ['delivery_id' => $deliveryId]);
 
 // ── Idempotency: skip duplicate deliveries ────────────────────
+// Use a dedicated settings key per delivery_id for fast O(1) dedup
+// Avoids full-table LIKE scan on the logs table
 if (!empty($deliveryId)) {
+    $dedupKey = 'wh_dedup_' . md5($deliveryId);
     $exists = Database::fetchValue(
-        "SELECT COUNT(*) FROM logs WHERE context = 'Webhook' AND message LIKE ?",
-        ['%' . $deliveryId . '%']
+        "SELECT 1 FROM settings WHERE key_name = ? LIMIT 1",
+        [$dedupKey]
     );
-    if ($exists > 0) {
+    if ($exists) {
         http_response_code(200);
         exit(json_encode(['status' => 'duplicate', 'delivery_id' => $deliveryId]));
     }
+    // Mark as received immediately (before processing) to prevent race conditions
+    Database::execute(
+        "INSERT IGNORE INTO settings (key_name, key_value) VALUES (?, ?)",
+        [$dedupKey, date('Y-m-d H:i:s')]
+    );
 }
 
 // ── Route event ───────────────────────────────────────────────
@@ -83,7 +91,7 @@ try {
             break;
     }
 
-    // Log delivery ID to prevent duplicate processing
+    // Log the processed delivery ID for audit trail
     if (!empty($deliveryId)) {
         AppLogger::db('info', 'Webhook', "Processed event: {$event} | {$deliveryId}");
     }

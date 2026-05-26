@@ -126,6 +126,8 @@ foreach ($updates as $key => $value) {
              ON DUPLICATE KEY UPDATE key_value = VALUES(key_value)',
             [$key, (string) $validated]
         );
+        // Invalidate the in-memory cache so getSetting() returns fresh value
+        clearSettingCache($key);
         $saved[] = $key;
     } catch (PDOException $e) {
         $errors[] = "Failed to save '{$key}': " . $e->getMessage();

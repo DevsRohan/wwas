@@ -87,9 +87,8 @@ foreach ($results as $res) {
         default           => 'failed'
     };
 
-    // Skip leads that were already valid and set to valid again (no write needed)
-    // For invalid/not_on_whatsapp — also skip from outreach
-    $skipOutreach = in_array($dbStatus, ['not_on_whatsapp', 'invalid'], true) ? "'skipped'" : 'outreach_status';
+    // For invalid/not_on_whatsapp leads: also mark outreach as skipped
+    $shouldSkipOutreach = in_array($dbStatus, ['not_on_whatsapp', 'invalid'], true);
 
     Database::execute(
         "UPDATE leads

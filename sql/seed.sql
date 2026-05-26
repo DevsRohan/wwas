@@ -5,7 +5,7 @@
 
 -- Default Admin User (password: Admin@1234 - CHANGE IMMEDIATELY)
 INSERT INTO `admin_users` (`username`, `password_hash`, `email`) VALUES
-('admin', '$2y$12$YKnxRFV1yO3QGMb/RPm3suJUd6JqCaIoJxzX3jLN9nMzH.0k0VeKS', 'admin@example.com');
+('admin', '$2y$12$zI3lFel8PzOCRJjIkSo3Y.KKhkz5RRCqJgu5vszF2ubwFM1DcZt6e', 'admin@example.com');
 
 -- Default Settings
 INSERT INTO `settings` (`key_name`, `key_value`) VALUES
