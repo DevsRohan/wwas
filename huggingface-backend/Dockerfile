@@ -1,15 +1,16 @@
 # ============================================================
 # WWAS WhatsApp Engine - Hugging Face Spaces
 # Base: node:20-bullseye-slim (Debian 11)
-# Only installing packages confirmed to exist on Bullseye.
 # ============================================================
 
 FROM node:20-bullseye-slim
 
+# Install Chromium and dependencies (all confirmed on Bullseye)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     wget \
     fonts-liberation \
+    fonts-noto-color-emoji \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -41,23 +42,29 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
+# Puppeteer: use system chromium, skip bundled download
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+# HF Spaces runs as non-root user — create working dirs first
 WORKDIR /app
 
-COPY package*.json ./
+# Create required directories with proper permissions BEFORE copying files
+RUN mkdir -p /app/logs /app/wa_session \
+    && chmod 777 /app/logs /app/wa_session
 
-RUN npm install --omit=dev
+# Copy and install dependencies
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
+# Copy application source
 COPY . .
 
-RUN mkdir -p /app/wa_session /app/logs \
-    && chmod 755 /app/wa_session /app/logs
-
+# HF Spaces uses port 7860
 EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+# Health check - longer start period for Chromium init
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=5 \
     CMD wget --quiet --tries=1 --spider http://localhost:7860/health || exit 1
 
 CMD ["node", "server.js"]

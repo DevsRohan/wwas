@@ -9,10 +9,15 @@ const { createLogger, format, transports } = require('winston');
 const path = require('path');
 const fs = require('fs');
 
-// Ensure logs directory exists
+// Ensure logs directory exists — use try/catch so server never crashes on log init
 const logsDir = path.join(__dirname, '..', 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
+try {
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+} catch (e) {
+  // If we can't create logs dir (permission issue on HF), continue anyway
+  // Console logging will still work
 }
 
 const { combine, timestamp, printf, colorize, errors } = format;
@@ -29,6 +34,31 @@ const fileFormat = printf(({ level, message, timestamp: ts, context, ...meta }) 
   return JSON.stringify({ timestamp: ts, level, context: context || 'app', message, ...meta });
 });
 
+// Build file transports only if logs dir is writable
+const fileTransports = [];
+try {
+  fs.accessSync(logsDir, fs.constants.W_OK);
+  fileTransports.push(
+    new transports.File({
+      filename: path.join(logsDir, 'error.log'),
+      level: 'error',
+      format: fileFormat,
+      maxsize: 5 * 1024 * 1024,
+      maxFiles: 3,
+      tailable: true
+    }),
+    new transports.File({
+      filename: path.join(logsDir, 'combined.log'),
+      format: fileFormat,
+      maxsize: 10 * 1024 * 1024,
+      maxFiles: 5,
+      tailable: true
+    })
+  );
+} catch (e) {
+  // Logs dir not writable — console-only mode
+}
+
 const logger = createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: combine(
@@ -36,7 +66,6 @@ const logger = createLogger({
     timestamp({ format: 'YYYY-MM-DD HH:mm:ss' })
   ),
   transports: [
-    // Console transport (always on)
     new transports.Console({
       format: combine(
         colorize({ all: true }),
@@ -44,37 +73,18 @@ const logger = createLogger({
         consoleFormat
       )
     }),
-    // Error log file
-    new transports.File({
-      filename: path.join(logsDir, 'error.log'),
-      level: 'error',
-      format: fileFormat,
-      maxsize: 5 * 1024 * 1024, // 5MB
-      maxFiles: 3,
-      tailable: true
-    }),
-    // Combined log file
-    new transports.File({
-      filename: path.join(logsDir, 'combined.log'),
-      format: fileFormat,
-      maxsize: 10 * 1024 * 1024, // 10MB
-      maxFiles: 5,
-      tailable: true
-    })
+    ...fileTransports
   ],
-  // Don't exit on uncaught errors
   exitOnError: false
 });
 
 /**
  * Create a child logger with a specific context label
- * @param {string} context - Module/service name
- * @returns {object} Child logger with context bound
  */
 logger.child = function (context) {
   return {
-    info: (msg, meta = {}) => logger.info(msg, { context, ...meta }),
-    warn: (msg, meta = {}) => logger.warn(msg, { context, ...meta }),
+    info:  (msg, meta = {}) => logger.info(msg,  { context, ...meta }),
+    warn:  (msg, meta = {}) => logger.warn(msg,  { context, ...meta }),
     error: (msg, meta = {}) => logger.error(msg, { context, ...meta }),
     debug: (msg, meta = {}) => logger.debug(msg, { context, ...meta })
   };
