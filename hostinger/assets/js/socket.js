@@ -140,10 +140,10 @@ const SocketManager = (() => {
       _emit('message_ack', data);
     });
 
-    _socket.on('lead_replied', (data) => {
-      _emit('lead_replied', data);
-      Toast.info('Lead Replied! 💬', `${data.phone_number} replied — automation stopped`);
-    });
+    // NOTE: 'lead_replied' is NOT emitted by the HF engine.
+    // Lead reply detection happens via webhook.php (inbound_message event)
+    // which updates the DB and the frontend polls via get_leads.php.
+    // The message_received event below already covers live inbound notification.
 
     _socket.on('outreach_started', (data) => {
       _emit('outreach_started', data);

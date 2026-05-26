@@ -385,6 +385,11 @@ body {
   border: 1px solid var(--color-border);
   border-bottom-left-radius: 4px;
 }
+/* Pending outbound bubble — message being sent, not yet confirmed */
+.bubble.bubble-pending {
+  opacity: 0.6;
+  background: var(--color-green-400);
+}
 .bubble-time {
   font-size: 10.5px;
   color: var(--color-text-faint);
@@ -855,4 +860,11 @@ body {
   width: 100%;
   max-width: 400px;
   animation: modalIn 300ms ease;
+}
+
+/* ── CSV Dropzone drag state ──────────────────────────────── */
+.dragover {
+  border-color: var(--color-green-500) !important;
+  background: var(--color-green-50) !important;
+  box-shadow: var(--shadow-green);
 }

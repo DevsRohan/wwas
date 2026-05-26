@@ -38,6 +38,9 @@ $stuckQueued = Database::execute(
 // AND was last attempted > retry_delay seconds ago
 $retryDelaySec = (int) getSetting('retry_delay', CAMPAIGN_RETRY_DELAY);
 
+// IMPORTANT: Do NOT use a SELECT alias in HAVING with PDO bound placeholders.
+// MySQL resolves aliases inconsistently across versions when combined with ? bindings.
+// Use the full inline expression in the WHERE clause instead — this is deterministic.
 $failedLeads = Database::fetchAll(
     "SELECT id, business_name, phone_number,
             COALESCE(JSON_EXTRACT(tags, '$.retry_count'), 0) as retry_count
@@ -45,7 +48,7 @@ $failedLeads = Database::fetchAll(
      WHERE outreach_status = 'failed'
        AND whatsapp_status = 'valid'
        AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL ? SECOND)
-     HAVING retry_count < ?
+       AND COALESCE(JSON_EXTRACT(tags, '$.retry_count'), 0) < ?
      ORDER BY last_contacted_at ASC
      LIMIT 50",
     [$retryDelaySec, $maxRetries]
