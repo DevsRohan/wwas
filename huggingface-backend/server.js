@@ -39,6 +39,11 @@ const corsOrigins = (process.env.CORS_ORIGINS || '*')
 const app    = express();
 const server = http.createServer(app);
 
+// ── Trust proxy — REQUIRED for HF Spaces (sits behind nginx reverse proxy)
+//    Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+//    and crashes on every request. Value 1 = trust first proxy hop.
+app.set('trust proxy', 1);
+
 // ── Security headers ──────────────────────────────────────────
 app.use(helmet({
   contentSecurityPolicy: false, // Allow Socket.io
@@ -122,6 +127,9 @@ const err = (res, msg, code = 500)   => res.status(code).json({ success: false, 
 // ============================================================
 // ROUTES
 // ============================================================
+
+// ── GET / — HF Spaces health check (HF hits / not /ping) ─────
+app.get('/', (_req, res) => res.json({ status: 'ok', service: 'WhatsApp CRM Engine', ts: Date.now() }));
 
 // ── GET /ping — public liveness ───────────────────────────────
 app.get('/ping', (_req, res) => res.json({ pong: true, ts: Date.now() }));

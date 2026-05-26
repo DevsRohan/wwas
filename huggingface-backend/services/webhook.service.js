@@ -45,11 +45,14 @@ const deliverOnce = async (event, data, webhookId) => {
     throw new Error('HOSTINGER_WEBHOOK_URL not configured');
   }
 
+  // ── Payload structure matched to PHP webhook.php expectations ──
+  // PHP reads: $payload['event'], $payload['payload'], $payload['delivery_id']
+  // PHP signature header: HTTP_X_WWAS_SIGNATURE
   const payload = {
     event,
-    data,
-    webhookId,
-    timestamp: new Date().toISOString(),
+    payload:     data,          // PHP uses $data = $payload['payload']
+    delivery_id: webhookId,     // PHP uses $deliveryId = $payload['delivery_id']
+    timestamp:   new Date().toISOString(),
   };
 
   const body      = JSON.stringify(payload);
@@ -62,8 +65,10 @@ const deliverOnce = async (event, data, webhookId) => {
     'X-Timestamp':      Date.now().toString(),
   };
 
+  // PHP reads: $_SERVER['HTTP_X_WWAS_SIGNATURE']
+  // (HTTP header X-Wwas-Signature → PHP converts to HTTP_X_WWAS_SIGNATURE)
   if (signature) {
-    headers['X-Webhook-Signature'] = `sha256=${signature}`;
+    headers['X-Wwas-Signature'] = `sha256=${signature}`;
   }
 
   const response = await axios.post(HOSTINGER_WEBHOOK_URL, body, {
@@ -145,17 +150,35 @@ const deliver = async (event, data = {}, id = null) => {
 };
 
 // ── Named event senders ───────────────────────────────────────
+// NOTE: event names matched to PHP webhook.php switch() cases:
+//   'inbound_message'  → handleInboundMessage()
+//   'message_sent'     → handleOutboundConfirm()
+//   'message_failed'   → handleMessageFailed()
 const sendMessageReceived = (messageData) =>
-  deliver('message.received', messageData, `msg-in-${messageData.waMessageId || Date.now()}`);
+  deliver('inbound_message', {
+    phone_number:   messageData.phone,
+    message_text:   messageData.body,
+    wa_message_id:  messageData.waMessageId,
+    timestamp:      messageData.timestamp ? new Date(messageData.timestamp).getTime() : Date.now(),
+  }, `msg-in-${messageData.waMessageId || Date.now()}`);
 
 const sendMessageSent = (messageData) =>
-  deliver('message.sent', messageData, `msg-out-${messageData.waMessageId || Date.now()}`);
+  deliver('message_sent', {
+    phone_number:   messageData.phone,
+    wa_message_id:  messageData.waMessageId,
+    lead_id:        messageData.leadId,
+  }, `msg-out-${messageData.waMessageId || Date.now()}`);
 
 const sendMessageStatus = (statusData) =>
-  deliver('message.status', statusData, `msg-status-${statusData.waMessageId}-${statusData.status}`);
+  deliver('message_sent', {
+    phone_number:   statusData.phone,
+    wa_message_id:  statusData.waMessageId,
+    lead_id:        statusData.leadId || null,
+    status:         statusData.status,
+  }, `msg-status-${statusData.waMessageId}-${statusData.status}`);
 
 const sendLeadReplied = (leadData) =>
-  deliver('lead.replied', leadData, `lead-replied-${leadData.leadId || leadData.phone}`);
+  deliver('inbound_message', leadData, `lead-replied-${leadData.leadId || leadData.phone}`);
 
 const sendLeadValidated = (validationData) =>
   deliver('lead.validated', validationData, `lead-validated-${validationData.phone}-${Date.now()}`);
