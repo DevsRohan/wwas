@@ -1,297 +1,452 @@
 'use strict';
 
 // ============================================================
-// WWAS WhatsApp CRM - Main Server Entry Point
+// WhatsApp CRM Engine — Main Server
 // Express + Socket.io + WhatsApp Engine
-// Designed for Hugging Face Spaces (port 7860)
+// Optimized for Hugging Face Spaces (port 7860)
 // ============================================================
 
 require('dotenv').config();
 
-const http = require('http');
-const express = require('express');
-const { Server: SocketIOServer } = require('socket.io');
-const helmet = require('helmet');
-const cors = require('cors');
+const http        = require('http');
+const express     = require('express');
+const cors        = require('cors');
+const helmet      = require('helmet');
+const morgan      = require('morgan');
+const compression = require('compression');
+const rateLimit   = require('express-rate-limit');
+const { v4: uuidv4 } = require('uuid');
 
-const logger = require('./services/logger').child('Server');
-const whatsappService = require('./services/whatsapp');
-const queueService = require('./services/queue');
+const { logger }     = require('./services/logger.service');
+const socketService  = require('./services/socket.service');
+const waService      = require('./services/whatsapp.service');
+const queueService   = require('./services/queue.service');
+const webhookService = require('./services/webhook.service');
 
-const apiKeyAuth = require('./middleware/auth');
-const { apiLimiter, sendMessageLimiter } = require('./middleware/ratelimit');
+// ── Config ────────────────────────────────────────────────────
+// HF Spaces injects PORT env var — always use it, fallback to 7860
+const PORT       = parseInt(process.env.PORT || '7860', 10);
+const HOST       = '0.0.0.0'; // Must bind to all interfaces on HF
+const NODE_ENV   = process.env.NODE_ENV  || 'production';
+const API_KEY    = process.env.NODE_API_KEY || '';
 
-const sendRoute = require('./routes/send');
-const checkRoute = require('./routes/check');
-const healthRoute = require('./routes/health');
-
-// ============================================================
-// CONFIGURATION
-// ============================================================
-
-const PORT = parseInt(process.env.PORT || '7860', 10);
-const NODE_ENV = process.env.NODE_ENV || 'production';
-
-// Parse allowed CORS origins from env (comma-separated)
-const rawOrigins = process.env.ALLOWED_ORIGINS || '';
-const allowedOrigins = rawOrigins
+const corsOrigins = (process.env.CORS_ORIGINS || '*')
   .split(',')
-  .map(o => o.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
-// In development, allow all origins
-const corsOrigin = NODE_ENV === 'development'
-  ? '*'
-  : (allowedOrigins.length > 0 ? allowedOrigins : '*');
+// ── Express app ───────────────────────────────────────────────
+const app    = express();
+const server = http.createServer(app);
 
-logger.info('Starting WWAS WhatsApp Engine', { port: PORT, env: NODE_ENV, corsOrigin });
-
-// ============================================================
-// EXPRESS APP SETUP
-// ============================================================
-
-const app = express();
-
-// ── Security Headers ─────────────────────────────────────────
+// ── Security headers ──────────────────────────────────────────
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP — not serving HTML
-  crossOriginEmbedderPolicy: false
+  contentSecurityPolicy: false, // Allow Socket.io
+  crossOriginEmbedderPolicy: false,
 }));
 
 // ── CORS ──────────────────────────────────────────────────────
 app.use(cors({
-  origin: corsOrigin,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'X-API-Key', 'Authorization'],
-  credentials: false
+  origin:      corsOrigins.includes('*') ? '*' : corsOrigins,
+  methods:     ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Webhook-Signature',
+                   'X-Webhook-Id', 'X-Timestamp', 'X-Webhook-Source'],
+  credentials: true,
 }));
+app.options('*', cors());
 
-// ── Body Parsing ──────────────────────────────────────────────
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+// ── Body parsing ──────────────────────────────────────────────
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// ── Trust Proxy (needed for correct IP behind HF reverse proxy) ──
-app.set('trust proxy', 1);
+// ── Compression ───────────────────────────────────────────────
+app.use(compression());
 
-// ============================================================
-// HTTP SERVER + SOCKET.IO
-// ============================================================
+// ── HTTP request logging ──────────────────────────────────────
+if (NODE_ENV !== 'test') {
+  app.use(morgan('combined', {
+    stream: {
+      write: (msg) => logger.info(msg.trim(), { source: 'http' }),
+    },
+    skip: (req) => req.url === '/health' || req.url === '/ping',
+  }));
+}
 
-const httpServer = http.createServer(app);
+// ── Rate limiting ─────────────────────────────────────────────
+const limiter = rateLimit({
+  windowMs:         parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
+  max:              parseInt(process.env.RATE_LIMIT_MAX        || '100',   10),
+  standardHeaders:  true,
+  legacyHeaders:    false,
+  message:          { success: false, error: 'Too many requests — please slow down' },
+  skip: (req)    => req.url === '/health' || req.url === '/ping',
+});
+app.use(limiter);
 
-const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: corsOrigin,
-    methods: ['GET', 'POST']
-  },
-  // Allow both WebSocket and polling (polling fallback for HF)
-  transports: ['websocket', 'polling'],
-  // Ping settings for connection health monitoring
-  pingTimeout: 60000,
-  pingInterval: 25000,
-  // Reconnection handled on client side
-  allowEIO3: true
+// ── Request ID middleware ─────────────────────────────────────
+app.use((req, _res, next) => {
+  req.id = uuidv4();
+  next();
 });
 
-// Expose io on app so routes can access it via req.app.get('io')
-app.set('io', io);
-
-// ============================================================
-// SOCKET.IO CONNECTION HANDLING
-// ============================================================
-
-io.on('connection', (socket) => {
-  const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
-  logger.info('Client connected via Socket.io', { socketId: socket.id, ip: clientIp });
-
-  // Send current system state immediately on connect
-  const waStatus = whatsappService.getStatus();
-  const queueState = queueService.getState();
-
-  socket.emit('connection_ack', {
-    socketId: socket.id,
-    wa_status: waStatus,
-    queue_state: queueState,
-    server_time: Date.now()
-  });
-
-  // If QR is available (WA awaiting scan), send it to this new client
-  const currentQR = whatsappService.getQR();
-  if (currentQR) {
-    socket.emit('qr_code', { qr: currentQR, timestamp: Date.now() });
+// ── API Key authentication middleware ─────────────────────────
+const requireApiKey = (req, res, next) => {
+  // Skip auth if no key configured (dev mode)
+  if (!API_KEY || API_KEY.trim() === '') {
+    logger.warn('API key auth skipped — NODE_API_KEY not set', {
+      source: 'auth', path: req.path,
+    });
+    return next();
   }
 
-  // If WA is already ready, inform this client
-  if (waStatus.isReady) {
-    socket.emit('whatsapp_ready', { timestamp: Date.now(), status: 'connected' });
+  const provided = req.headers['x-api-key']
+    || req.query.api_key
+    || '';
+
+  if (provided !== API_KEY) {
+    logger.warn('API auth failed — invalid key', {
+      source: 'auth',
+      path:   req.path,
+      ip:     req.ip,
+    });
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
   }
 
-  // Handle client-side queue control events
-  socket.on('queue_pause', () => {
-    logger.info('Queue pause requested via socket', { socketId: socket.id });
-    queueService.pause();
-  });
+  next();
+};
 
-  socket.on('queue_resume', () => {
-    logger.info('Queue resume requested via socket', { socketId: socket.id });
-    queueService.resume();
-  });
-
-  socket.on('queue_clear', () => {
-    logger.info('Queue clear requested via socket', { socketId: socket.id });
-    queueService.clear();
-  });
-
-  // Heartbeat — client pings, server responds
-  socket.on('ping_server', () => {
-    socket.emit('pong_server', { timestamp: Date.now() });
-  });
-
-  socket.on('disconnect', (reason) => {
-    logger.info('Client disconnected', { socketId: socket.id, reason });
-  });
-
-  socket.on('error', (err) => {
-    logger.error('Socket error', { socketId: socket.id, error: err.message });
-  });
-});
-
-// ============================================================
-// HEARTBEAT BROADCAST
-// Sends periodic heartbeat to all connected clients
-// so frontend can detect connection health
-// ============================================================
-
-setInterval(() => {
-  const waStatus = whatsappService.getStatus();
-  const queueState = queueService.getState();
-  io.emit('heartbeat', {
-    timestamp: Date.now(),
-    wa_ready: waStatus.isReady,
-    queue_size: queueState.size,
-    queue_processing: queueState.processing
-  });
-}, 30000); // Every 30 seconds
+// ── Helpers ───────────────────────────────────────────────────
+const ok  = (res, data = {})         => res.json({ success: true,  ...data });
+const err = (res, msg, code = 500)   => res.status(code).json({ success: false, error: msg });
 
 // ============================================================
 // ROUTES
 // ============================================================
 
-// Health check - NO auth (needed for Docker HEALTHCHECK + PHP polling)
-app.use('/health', healthRoute);
+// ── GET /ping — public liveness ───────────────────────────────
+app.get('/ping', (_req, res) => res.json({ pong: true, ts: Date.now() }));
 
-// Protected routes - require API key
-app.use('/send-message', apiKeyAuth, sendMessageLimiter, sendRoute);
-app.use('/check-number', apiKeyAuth, apiLimiter, checkRoute);
+// ── GET /health — detailed health (auth required) ────────────
+app.get('/health', requireApiKey, (_req, res) => {
+  const waStatus    = waService.getStatus();
+  const queueState  = queueService.getState();
+  const socketStats = socketService.getStats();
 
-// Queue control via REST (alternative to socket events)
-app.post('/queue/pause', apiKeyAuth, (req, res) => {
-  queueService.pause();
-  res.json({ success: true, message: 'Queue paused' });
+  ok(res, {
+    status:   'ok',
+    uptime:   process.uptime(),
+    memory:   process.memoryUsage(),
+    env:      NODE_ENV,
+    whatsapp: waStatus,
+    queue:    queueState,
+    sockets:  socketStats,
+    ts:       new Date().toISOString(),
+  });
 });
 
-app.post('/queue/resume', apiKeyAuth, (req, res) => {
-  queueService.resume();
-  res.json({ success: true, message: 'Queue resumed' });
+// ── POST /send-message ────────────────────────────────────────
+// Body: { phone, message, leadId, immediate? }
+app.post('/send-message', requireApiKey, async (req, res) => {
+  const { phone, message, leadId, immediate = false,
+          delayMin, delayMax, businessName } = req.body;
+
+  if (!phone || !message) {
+    return err(res, 'phone and message are required', 400);
+  }
+
+  // Normalize phone
+  const normalizedPhone = String(phone).replace(/\D/g, '');
+  if (normalizedPhone.length < 10 || normalizedPhone.length > 15) {
+    return err(res, 'Invalid phone number format', 400);
+  }
+
+  logger.info('Send message request received', {
+    source: 'api',
+    phone:  normalizedPhone,
+    leadId,
+    immediate,
+  });
+
+  try {
+    if (immediate) {
+      // Direct send — bypass queue (for manual messages)
+      const waStatus = waService.getStatus();
+      if (waStatus.status !== 'connected') {
+        return err(res, 'WhatsApp not connected', 503);
+      }
+
+      const result = await waService.sendMessage(normalizedPhone, message);
+      return ok(res, { waMessageId: result.waMessageId, queued: false });
+
+    } else {
+      // Queue-based send (outreach automation)
+      const jobId = leadId ? `lead-${leadId}` : `msg-${Date.now()}`;
+
+      const queued = queueService.addJob({
+        id:           jobId,
+        leadId:       leadId ? parseInt(leadId, 10) : null,
+        phone:        normalizedPhone,
+        message,
+        businessName: businessName || '',
+        delayMin:     delayMin ? parseInt(delayMin, 10) * 1000 : undefined,
+        delayMax:     delayMax ? parseInt(delayMax, 10) * 1000 : undefined,
+      });
+
+      if (!queued.queued) {
+        return err(res, queued.reason || 'Could not queue message', 409);
+      }
+
+      return ok(res, {
+        queued:      true,
+        jobId,
+        queueLength: queueService.getState().queueLength,
+      });
+    }
+
+  } catch (e) {
+    logger.error('Send message error', { source: 'api', error: e.message });
+    return err(res, e.message);
+  }
 });
 
-app.post('/queue/clear', apiKeyAuth, (req, res) => {
-  queueService.clear();
-  res.json({ success: true, message: 'Queue cleared' });
+// ── POST /check-number ────────────────────────────────────────
+// Body: { phone } OR { phones: [] }
+app.post('/check-number', requireApiKey, async (req, res) => {
+  const { phone, phones } = req.body;
+
+  try {
+    const waStatus = waService.getStatus();
+    if (waStatus.status !== 'connected') {
+      return err(res, 'WhatsApp not connected', 503);
+    }
+
+    // Batch mode
+    if (phones && Array.isArray(phones)) {
+      if (phones.length > 50) {
+        return err(res, 'Maximum 50 numbers per batch request', 400);
+      }
+
+      const normalized = phones
+        .map((p) => String(p).replace(/\D/g, ''))
+        .filter((p) => p.length >= 10 && p.length <= 15);
+
+      logger.info('Batch number check started', {
+        source: 'api', count: normalized.length,
+      });
+
+      // Start async batch — return immediately, results via webhook+socket
+      waService.checkNumberBatch(normalized, 1500).catch((e) => {
+        logger.error('Batch check error', { source: 'api', error: e.message });
+      });
+
+      return ok(res, {
+        message: 'Batch validation started',
+        total:   normalized.length,
+        note:    'Results delivered via webhook and socket events',
+      });
+    }
+
+    // Single number
+    if (!phone) {
+      return err(res, 'phone or phones[] required', 400);
+    }
+
+    const normalizedPhone = String(phone).replace(/\D/g, '');
+    if (normalizedPhone.length < 10 || normalizedPhone.length > 15) {
+      return err(res, 'Invalid phone number format', 400);
+    }
+
+    const result = await waService.checkNumber(normalizedPhone);
+    return ok(res, result);
+
+  } catch (e) {
+    logger.error('Check number error', { source: 'api', error: e.message });
+    return err(res, e.message);
+  }
 });
 
-app.get('/queue/state', apiKeyAuth, (req, res) => {
-  res.json({ success: true, state: queueService.getState() });
+// ── POST /queue/pause ─────────────────────────────────────────
+app.post('/queue/pause', requireApiKey, (_req, res) => {
+  const result = queueService.pause();
+  ok(res, result);
 });
 
-// WhatsApp status via REST
-app.get('/wa/status', apiKeyAuth, (req, res) => {
-  res.json({ success: true, status: whatsappService.getStatus() });
+// ── POST /queue/resume ────────────────────────────────────────
+app.post('/queue/resume', requireApiKey, (_req, res) => {
+  const result = queueService.resume();
+  ok(res, result);
 });
 
-// 404 handler
+// ── POST /queue/stop ──────────────────────────────────────────
+app.post('/queue/stop', requireApiKey, (_req, res) => {
+  const result = queueService.stop();
+  ok(res, result);
+});
+
+// ── GET /queue/state ──────────────────────────────────────────
+app.get('/queue/state', requireApiKey, (_req, res) => {
+  ok(res, queueService.getState());
+});
+
+// ── POST /queue/remove ────────────────────────────────────────
+// Body: { leadId }
+app.post('/queue/remove', requireApiKey, (req, res) => {
+  const { leadId } = req.body;
+  if (!leadId) return err(res, 'leadId required', 400);
+  const removed = queueService.removeJob(parseInt(leadId, 10));
+  ok(res, { removed });
+});
+
+// ── GET /whatsapp/status ──────────────────────────────────────
+app.get('/whatsapp/status', requireApiKey, (_req, res) => {
+  ok(res, waService.getStatus());
+});
+
+// ── GET /whatsapp/qr ──────────────────────────────────────────
+app.get('/whatsapp/qr', requireApiKey, (_req, res) => {
+  const qr = waService.getQR();
+  if (!qr) {
+    return err(res, 'No QR code available — client may already be connected', 404);
+  }
+  ok(res, { qr });
+});
+
+// ── POST /whatsapp/restart ────────────────────────────────────
+app.post('/whatsapp/restart', requireApiKey, async (_req, res) => {
+  logger.info('WA restart requested via API', { source: 'api' });
+  ok(res, { message: 'WhatsApp restart initiated' });
+  // Restart after response sent
+  setTimeout(() => waService.initialize(), 500);
+});
+
+// ── POST /whatsapp/logout ─────────────────────────────────────
+app.post('/whatsapp/logout', requireApiKey, async (_req, res) => {
+  try {
+    await waService.logout();
+    ok(res, { message: 'Logged out successfully' });
+  } catch (e) {
+    err(res, e.message);
+  }
+});
+
+// ── GET /socket/stats ─────────────────────────────────────────
+app.get('/socket/stats', requireApiKey, (_req, res) => {
+  ok(res, socketService.getStats());
+});
+
+// ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
-  res.status(404).json({ success: false, error: `Route not found: ${req.method} ${req.path}` });
+  logger.warn('404 Not Found', { source: 'http', path: req.path, method: req.method });
+  res.status(404).json({ success: false, error: 'Endpoint not found' });
 });
 
-// Global error handler
-app.use((err, req, res, _next) => {
-  logger.error('Unhandled Express error', { error: err.message, stack: err.stack, path: req.path });
+// ── Global error handler ──────────────────────────────────────
+app.use((error, req, res, _next) => {
+  logger.error('Unhandled express error', {
+    source: 'http',
+    path:   req.path,
+    error:  error.message,
+    stack:  NODE_ENV === 'development' ? error.stack : undefined,
+  });
   res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
 // ============================================================
-// INITIALIZE SERVICES & START SERVER
+// STARTUP
 // ============================================================
 
-async function bootstrap() {
+const start = async () => {
   try {
-    // Initialize queue with Socket.io
-    queueService.init(io);
-    logger.info('Queue service ready');
+    // ── Initialize Socket.io ───────────────────────────────
+    socketService.init(server);
+    logger.info('Socket.io initialized', { source: 'startup' });
 
-    // Initialize WhatsApp client with Socket.io
-    whatsappService.init(io);
-    logger.info('WhatsApp service initializing...');
-
-    // Start HTTP server
-    httpServer.listen(PORT, '0.0.0.0', () => {
-      logger.info(`WWAS Engine listening on port ${PORT}`);
-      logger.info(`Health endpoint: http://0.0.0.0:${PORT}/health`);
-      logger.info(`Environment: ${NODE_ENV}`);
+    // ── Start HTTP server ──────────────────────────────────
+    server.listen(PORT, HOST, () => {
+      logger.info(`WhatsApp CRM Engine running`, {
+        source: 'startup',
+        port:   PORT,
+        host:   HOST,
+        env:    NODE_ENV,
+        url:    `http://${HOST}:${PORT}`,
+      });
     });
 
+    // ── Initialize WhatsApp client ─────────────────────────
+    logger.info('Initializing WhatsApp client...', { source: 'startup' });
+    await waService.initialize();
+
+    // ── Periodic system stats broadcast (every 60s) ────────
+    setInterval(() => {
+      const waStatus   = waService.getStatus();
+      const queueState = queueService.getState();
+      socketService.emit.systemStats({
+        whatsapp: {
+          status: waStatus.status,
+          phone:  waStatus.phone,
+        },
+        queue: {
+          length:    queueState.queueLength,
+          isRunning: queueState.isRunning,
+          isPaused:  queueState.isPaused,
+          sendCount: queueState.sendCount,
+        },
+        uptime:   process.uptime(),
+        memory:   process.memoryUsage().heapUsed,
+        ts:       Date.now(),
+      });
+    }, 60000);
+
   } catch (err) {
-    logger.error('Bootstrap failed', { error: err.message, stack: err.stack });
+    logger.error('Fatal startup error', { source: 'startup', error: err.message });
     process.exit(1);
   }
-}
+};
 
 // ============================================================
 // GRACEFUL SHUTDOWN
 // ============================================================
 
-async function shutdown(signal) {
-  logger.info(`Received ${signal}, shutting down gracefully...`);
+const gracefulShutdown = async (signal) => {
+  logger.info(`${signal} received — shutting down gracefully`, { source: 'shutdown' });
 
   // Stop accepting new connections
-  httpServer.close(() => {
-    logger.info('HTTP server closed');
+  server.close(async () => {
+    logger.info('HTTP server closed', { source: 'shutdown' });
   });
 
-  // Pause queue to prevent new sends
-  queueService.pause();
-
-  // Destroy WhatsApp client
   try {
-    await whatsappService.destroy();
-    logger.info('WhatsApp client shut down');
-  } catch (err) {
-    logger.warn('Error shutting down WhatsApp', { error: err.message });
+    queueService.stop();
+    await waService.shutdown();
+    logger.info('Graceful shutdown complete', { source: 'shutdown' });
+    process.exit(0);
+  } catch (e) {
+    logger.error('Error during shutdown', { source: 'shutdown', error: e.message });
+    process.exit(1);
   }
+};
 
-  // Disconnect all sockets
-  io.disconnectSockets(true);
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
-  logger.info('Graceful shutdown complete');
-  process.exit(0);
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
-// ── Uncaught exception handlers (prevent crash on unhandled errors) ──
-process.on('uncaughtException', (err) => {
-  logger.error('UNCAUGHT EXCEPTION', { error: err.message, stack: err.stack });
-  // Don't exit — log and continue (WA session would be lost on restart)
+// ── Unhandled rejection safety net ───────────────────────────
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Promise Rejection', {
+    source: 'process',
+    reason: reason?.message || String(reason),
+    promise: String(promise),
+  });
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('UNHANDLED REJECTION', {
-    reason: reason instanceof Error ? reason.message : String(reason),
-    stack: reason instanceof Error ? reason.stack : undefined
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception', {
+    source: 'process',
+    error:  err.message,
+    stack:  err.stack,
   });
+  // Give logger time to flush then exit
+  setTimeout(() => process.exit(1), 1000);
 });
 
 // ── Start ─────────────────────────────────────────────────────
-bootstrap();
+start();
