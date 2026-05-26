@@ -361,20 +361,29 @@ const start = async () => {
     socketService.init(server);
     logger.info('Socket.io initialized', { source: 'startup' });
 
-    // ── Start HTTP server ──────────────────────────────────
-    server.listen(PORT, HOST, () => {
-      logger.info(`WhatsApp CRM Engine running`, {
-        source: 'startup',
-        port:   PORT,
-        host:   HOST,
-        env:    NODE_ENV,
-        url:    `http://${HOST}:${PORT}`,
+    // ── Start HTTP server FIRST — HF Spaces needs port 7860
+    //    to respond BEFORE anything else, or it shows "refused to connect"
+    await new Promise((resolve) => {
+      server.listen(PORT, HOST, () => {
+        logger.info(`WhatsApp CRM Engine running`, {
+          source: 'startup',
+          port:   PORT,
+          host:   HOST,
+          env:    NODE_ENV,
+          url:    `http://${HOST}:${PORT}`,
+        });
+        resolve();
       });
     });
 
-    // ── Initialize WhatsApp client ─────────────────────────
+    // ── Initialize WhatsApp client AFTER server is up ──────
+    // Non-blocking: WA errors must NOT crash the HTTP server
     logger.info('Initializing WhatsApp client...', { source: 'startup' });
-    await waService.initialize();
+    waService.initialize().catch((e) => {
+      logger.error('WhatsApp init error (non-fatal) — will auto-retry', {
+        source: 'startup', error: e.message,
+      });
+    });
 
     // ── Periodic system stats broadcast (every 60s) ────────
     setInterval(() => {
@@ -399,7 +408,8 @@ const start = async () => {
 
   } catch (err) {
     logger.error('Fatal startup error', { source: 'startup', error: err.message });
-    process.exit(1);
+    // Don't exit — keep server alive so HF doesn't show "refused to connect"
+    // WA service has its own auto-restart logic
   }
 };
 
@@ -444,8 +454,8 @@ process.on('uncaughtException', (err) => {
     error:  err.message,
     stack:  err.stack,
   });
-  // Give logger time to flush then exit
-  setTimeout(() => process.exit(1), 1000);
+  // On HF Spaces: do NOT exit — let the server stay alive
+  // WA service errors are non-fatal; HTTP server must keep running
 });
 
 // ── Start ─────────────────────────────────────────────────────

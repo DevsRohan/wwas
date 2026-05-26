@@ -32,4 +32,9 @@ RUN chown -R node:node /app
 USER node
 
 EXPOSE 7860
+
+# HF Spaces health check — must respond on /ping within 30s
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD wget -qO- http://localhost:7860/ping || exit 1
+
 CMD ["node", "server.js"]

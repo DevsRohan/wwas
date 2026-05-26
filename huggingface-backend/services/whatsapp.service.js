@@ -10,7 +10,7 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode         = require('qrcode');
 const { logger }     = require('./logger.service');
-const { emit }       = require('./socket.service');
+const { emit, broadcast } = require('./socket.service');
 const webhookService = require('./webhook.service');
 const queueService   = require('./queue.service');
 
@@ -117,7 +117,7 @@ const _bindEvents = (c) => {
   c.on('loading_screen', (percent, message) => {
     clientStatus = 'connecting';
     logger.info(`WA loading: ${percent}% — ${message}`, { source: 'whatsapp' });
-    emit.broadcast('whatsapp:loading', { percent, message });
+    broadcast('whatsapp:loading', { percent, message });
   });
 
   // ── Authenticated ─────────────────────────────────────────
