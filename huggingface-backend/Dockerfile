@@ -1,20 +1,18 @@
 # ============================================================
 # WWAS WhatsApp Engine - Hugging Face Spaces Dockerfile
-# Node.js 20 on Debian Bookworm + Chromium for whatsapp-web.js
+# Node.js 20 on Debian Bullseye (11) + Chromium for whatsapp-web.js
 #
-# FIX: node:20-slim uses Debian Bookworm where:
-#   - libxss1 does NOT exist (removed in Bookworm)
-#   - chromium-driver is NOT a separate package
-#   - libx11-xcb1 replaces some xcb deps
-# Solution: use node:20-bookworm-slim explicitly and remove
-#   packages that don't exist in Bookworm.
+# WHY BULLSEYE not BOOKWORM:
+#   Debian Bookworm removed several packages that Chromium/Puppeteer
+#   depends on (libxss1, etc). Bullseye has a stable, complete set
+#   of all required X11 and media libraries.
+#   node:20-bullseye is the proven working base for whatsapp-web.js.
 # ============================================================
 
-FROM node:20-bookworm-slim
+FROM node:20-bullseye-slim
 
-# Install Chromium and all required system dependencies
-# NOTE: libxss1 is NOT available in Debian Bookworm — it was removed.
-# chromium already pulls in all required X11/xcb libs on Bookworm.
+# Install Chromium and all required system dependencies for Puppeteer
+# All packages below exist on Debian Bullseye (confirmed).
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -32,17 +30,16 @@ RUN apt-get update && apt-get install -y \
     libnss3 \
     libpango-1.0-0 \
     libx11-6 \
-    libx11-xcb1 \
     libxcb1 \
     libxcomposite1 \
     libxdamage1 \
     libxext6 \
     libxfixes3 \
     libxrandr2 \
+    libxss1 \
     libxtst6 \
     wget \
     ca-certificates \
-    gnupg \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,25 +50,25 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 # Create app directory
 WORKDIR /app
 
-# Copy package files first (separate layer = better cache on HF)
+# Copy package files first (better Docker layer caching)
 COPY package*.json ./
 
-# Install production dependencies only
+# Install only production dependencies
 RUN npm ci --only=production
 
 # Copy all application source files
 COPY . .
 
 # Create session and logs directories
-# These are ephemeral on HF free tier — lost on restart.
-# On paid HF tier, mount persistent storage to /app/wa_session.
+# NOTE: On HF free tier these are ephemeral (lost on restart).
+# On paid HF tier with persistent storage, mount to /app/wa_session.
 RUN mkdir -p /app/wa_session /app/logs \
     && chmod 755 /app/wa_session /app/logs
 
 # Hugging Face Spaces binds to port 7860
 EXPOSE 7860
 
-# Docker health check (used by HF to determine if Space is running)
+# Docker health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost:7860/health || exit 1
 
