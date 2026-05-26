@@ -314,7 +314,6 @@
       const btn     = document.getElementById('btn-gen-message');
       const area    = document.getElementById('generated-msg-area');
       const textEl  = document.getElementById('generated-msg-text');
-      const copyBtn = document.getElementById('btn-copy-msg');
       const restore  = Skeleton.btn(btn, 'Generating...');
 
       const res = await Utils.post('/api/generate_message.php', { lead_id: leadId, save: true, force: true });
@@ -325,10 +324,17 @@
       if (area)   area.style.display = 'block';
       if (textEl) textEl.textContent = res.data?.message || '';
 
-      copyBtn?.addEventListener('click', async () => {
-        await Utils.copyText(textEl?.textContent || '');
-        Toast.success('Copied!', 'Message copied to clipboard');
-      });
+      // Re-query copyBtn here in case DOM wasn't ready before
+      // Replace with clone to prevent duplicate listener accumulation
+      const copyBtn = document.getElementById('btn-copy-msg');
+      if (copyBtn) {
+        const freshCopyBtn = copyBtn.cloneNode(true);
+        copyBtn.parentNode.replaceChild(freshCopyBtn, copyBtn);
+        freshCopyBtn.addEventListener('click', async () => {
+          await Utils.copyText(textEl?.textContent || '');
+          Toast.success('Copied!', 'Message copied to clipboard');
+        });
+      }
     }
 
     return { init, load, close };

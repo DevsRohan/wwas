@@ -26,10 +26,15 @@ const apiLimiter = rateLimit({
       ip: req.headers['x-forwarded-for'] || req.ip,
       path: req.path
     });
+    // express-rate-limit v7: resetTime is a Date object
+    const resetTime = req.rateLimit?.resetTime;
+    const retryAfter = resetTime
+      ? Math.max(0, Math.ceil((resetTime.getTime() - Date.now()) / 1000))
+      : 60;
     res.status(429).json({
       success: false,
       error: 'Too many requests. Please slow down.',
-      retry_after: Math.ceil(req.rateLimit.resetTime / 1000)
+      retry_after: retryAfter
     });
   },
   skip: (req) => {

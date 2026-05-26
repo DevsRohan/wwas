@@ -316,7 +316,7 @@ function getPitchType(?string $websiteUrl): string
 
 /**
  * Get a single setting value from the settings table.
- * Returns default if key not found.
+ * Uses a global request-level cache. Cache is invalidated by clearSettingCache().
  *
  * @param string $key
  * @param mixed  $default
@@ -324,21 +324,41 @@ function getPitchType(?string $websiteUrl): string
  */
 function getSetting(string $key, $default = null)
 {
-    static $cache = [];
+    global $_wwas_settings_cache;
+    if (!is_array($_wwas_settings_cache)) {
+        $_wwas_settings_cache = [];
+    }
 
-    if (!isset($cache[$key])) {
+    if (!array_key_exists($key, $_wwas_settings_cache)) {
         $val = Database::fetchValue(
             'SELECT key_value FROM settings WHERE key_name = ? LIMIT 1',
             [$key]
         );
-        $cache[$key] = ($val !== null) ? $val : $default;
+        $_wwas_settings_cache[$key] = ($val !== null) ? $val : $default;
     }
 
-    return $cache[$key];
+    return $_wwas_settings_cache[$key];
+}
+
+/**
+ * Invalidate the getSetting cache for a specific key or all keys.
+ * Call this after updateSetting() to ensure fresh values are returned.
+ *
+ * @param string|null $key  Specific key to clear, or null to clear all
+ */
+function clearSettingCache(?string $key = null): void
+{
+    global $_wwas_settings_cache;
+    if ($key === null) {
+        $_wwas_settings_cache = [];
+    } else {
+        unset($_wwas_settings_cache[$key]);
+    }
 }
 
 /**
  * Get multiple settings at once as an associative array.
+ * Uses the same global cache as getSetting().
  *
  * @param array $keys
  * @return array
@@ -347,21 +367,42 @@ function getSettings(array $keys): array
 {
     if (empty($keys)) return [];
 
-    $placeholders = implode(',', array_fill(0, count($keys), '?'));
-    $rows = Database::fetchAll(
-        "SELECT key_name, key_value FROM settings WHERE key_name IN ({$placeholders})",
-        $keys
-    );
+    global $_wwas_settings_cache;
+    if (!is_array($_wwas_settings_cache)) {
+        $_wwas_settings_cache = [];
+    }
 
-    $result = array_fill_keys($keys, null);
-    foreach ($rows as $row) {
-        $result[$row['key_name']] = $row['key_value'];
+    // Determine which keys are not yet cached
+    $missing = array_filter($keys, fn($k) => !array_key_exists($k, $_wwas_settings_cache));
+
+    if (!empty($missing)) {
+        $placeholders = implode(',', array_fill(0, count($missing), '?'));
+        $rows = Database::fetchAll(
+            "SELECT key_name, key_value FROM settings WHERE key_name IN ({$placeholders})",
+            array_values($missing)
+        );
+        // Store fetched values in cache
+        $fetched = [];
+        foreach ($rows as $row) {
+            $fetched[$row['key_name']] = $row['key_value'];
+        }
+        // Cache all missing keys (null if not found in DB)
+        foreach ($missing as $k) {
+            $_wwas_settings_cache[$k] = $fetched[$k] ?? null;
+        }
+    }
+
+    // Build result from cache
+    $result = [];
+    foreach ($keys as $k) {
+        $result[$k] = $_wwas_settings_cache[$k] ?? null;
     }
     return $result;
 }
 
 /**
  * Update a setting value in the database.
+ * Also clears the in-memory cache for that key.
  *
  * @param string $key
  * @param mixed  $value
@@ -374,6 +415,8 @@ function updateSetting(string $key, $value): bool
          ON DUPLICATE KEY UPDATE key_value = VALUES(key_value)',
         [$key, (string) $value]
     );
+    // Invalidate cache so next getSetting() reads fresh value
+    clearSettingCache($key);
     return $affected > 0;
 }
 

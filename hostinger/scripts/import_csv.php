@@ -155,8 +155,18 @@ function importCsv(string $filePath): array
         }
 
         // ── Extract fields ────────────────────────────────────
+        // Safe helper: get value from data using colMap key, with empty-string guard
+        $getCol = function(string $mapKey, string $fallback = '') use ($data, $colMap): string {
+            $col = $colMap[$mapKey] ?? '';
+            if ($col !== '' && isset($data[$col])) {
+                return (string) $data[$col];
+            }
+            // Fallback: try direct key name
+            return isset($data[$fallback]) ? (string) $data[$fallback] : '';
+        };
+
         $businessName = sanitizeString(
-            $data[$colMap['name']] ?? ($data['business_name'] ?? ''),
+            $getCol('name', 'business_name'),
             255
         );
 
@@ -166,7 +176,7 @@ function importCsv(string $filePath): array
             continue;
         }
 
-        $rawPhone = $data[$colMap['phone']] ?? ($data['phone'] ?? '');
+        $rawPhone = $getCol('phone', 'phone');
         $phone    = normalizePhone($rawPhone);
 
         if (empty($phone)) {
@@ -175,10 +185,10 @@ function importCsv(string $filePath): array
             continue;
         }
 
-        $address    = sanitizeString($data[$colMap['address']] ?? '', 500);
-        $websiteRaw = sanitizeUrl($data[$colMap['website']] ?? '');
-        $ratingRaw  = sanitizeString($data[$colMap['rating']] ?? '0');
-        $reviewsRaw = sanitizeString($data[$colMap['reviews']] ?? '0');
+        $address    = sanitizeString($getCol('address', 'address'), 500);
+        $websiteRaw = sanitizeUrl($getCol('website', 'website'));
+        $ratingRaw  = sanitizeString($getCol('rating', 'rating') ?: '0');
+        $reviewsRaw = sanitizeString($getCol('reviews', 'reviews') ?: '0');
 
         // Parse rating (handle "4.2 stars" format)
         $rating = null;
@@ -204,8 +214,10 @@ function importCsv(string $filePath): array
         $state     = $addrParts['state'];
 
         // Override with explicit city/state columns if present
-        if (!empty($data[$colMap['city']] ?? ''))  $city  = sanitizeString($data[$colMap['city']], 100);
-        if (!empty($data[$colMap['state']] ?? '')) $state = sanitizeString($data[$colMap['state']], 100);
+        $explicitCity  = $getCol('city', 'city');
+        $explicitState = $getCol('state', 'state');
+        if (!empty($explicitCity))  $city  = sanitizeString($explicitCity, 100);
+        if (!empty($explicitState)) $state = sanitizeString($explicitState, 100);
 
         // Determine pitch type and website status
         $websiteStatus = (!empty($websiteRaw)) ? 'yes' : 'no';

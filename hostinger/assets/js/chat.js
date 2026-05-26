@@ -165,9 +165,15 @@ const ChatModule = (() => {
 
     const statusHtml = isOut ? `<div class="bubble-status">${_statusIcon(msg.status)}</div>` : '';
 
+    // Only add data-wa-id attribute when wa_message_id actually exists
+    // An empty data-wa-id="" would cause false querySelector matches
+    const waIdAttr = msg.wa_message_id
+      ? `data-wa-id="${Utils.escHtml(msg.wa_message_id)}"`
+      : '';
+
     wrap.innerHTML = `
       <div class="bubble ${isOut ? 'outbound' : 'inbound'}${msg.status === 'pending' ? ' bubble-pending' : ''}"
-           ${msg.wa_message_id ? `data-wa-id="${Utils.escHtml(msg.wa_message_id)}"` : ''}>
+           ${waIdAttr}>
         ${Utils.nl2br(msg.message_text)}
       </div>
       <div style="display:flex;align-items:center;gap:4px;">
